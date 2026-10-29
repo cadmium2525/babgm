@@ -1,0 +1,11 @@
+{
+  "name": "yoru-bgm",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/serve.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "audio": "node scripts/generate-audio.mjs"
+  }
+}
