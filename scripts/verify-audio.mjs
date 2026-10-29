@@ -11,7 +11,7 @@ assert.equal(wav.toString('ascii', 0, 4), 'RIFF');
 assert.equal(wav.readUInt16LE(22), 1);
 assert.equal(wav.readUInt32LE(24), 16000);
 assert.equal(wav.readUInt16LE(34), 16);
-assert.equal(wav.readUInt32LE(40), 60 * 16000 * 2);
+assert.equal(wav.readUInt32LE(40), 300 * 16000 * 2);
 const source = new Int16Array(wav.buffer, wav.byteOffset + 44, (wav.length - 44) / 2);
 let peak = 0;
 let maximumStep = 0;
@@ -59,7 +59,8 @@ async function render(message) {
 
 const invalid = await render({ id: 0, minutes: 0 });
 assert.equal(invalid.type, 'error');
-const rendered = await render({ id: 1, minutes: 0.1, offsetSeconds: 12.345 });
+const offsetSeconds = 299.8;
+const rendered = await render({ id: 1, minutes: 0.1, offsetSeconds });
 assert.equal(rendered.type, 'done', rendered.message);
 assert.equal(rendered.duration, 6);
 assert.equal(rendered.blob.type, 'audio/wav');
@@ -71,7 +72,7 @@ const count = (finite.length - 44) / 2;
 for (let i = 0; i < count; i += 97) {
   const fade = Math.cos(Math.PI / 2 * i / (count - 1));
   const attack = i < 480 ? Math.sin(Math.PI / 2 * i / 480) : 1;
-  const expected = Math.round(source[(Math.round(12.345 * 16000) + i) % source.length] * fade * attack);
+  const expected = Math.round(source[(Math.round(offsetSeconds * 16000) + i) % source.length] * fade * attack) || 0;
   assert.equal(finite.readInt16LE(44 + i * 2), expected, `Envelope at ${i}`);
 }
 
@@ -104,7 +105,7 @@ const wavMinutesArgument = process.argv.find((argument) => argument.startsWith('
 const maximumWav = process.argv.includes('--max-wav') || Boolean(wavMinutesArgument);
 const minutes = wavMinutesArgument ? Number(wavMinutesArgument.split('=')[1])
   : process.argv.includes('--long') || maximumWav ? 60 : 0.1;
-const media = await render({ id: 2, minutes, offsetSeconds: 59.8, format: maximumWav ? 'wav' : 'mp3' });
+const media = await render({ id: 2, minutes, offsetSeconds, format: maximumWav ? 'wav' : 'mp3' });
 assert.equal(media.type, 'done', media.message);
 assert.equal(media.duration, minutes * 60);
 let metrics;
@@ -124,7 +125,7 @@ if (maximumWav) {
 }
 assert.equal(lastProgress, 1);
 console.log(JSON.stringify({
-  status: 'passed', pcmSeconds: 60, peak: peak / 32768,
+  status: 'passed', pcmSeconds: 300, peak: peak / 32768,
   seamStep: Math.abs(source[0] - source.at(-1)) / 32768,
   exactCosineEnvelope: true, media: metrics,
   encodingSeconds: (performance.now() - start) / 1000,

@@ -1,8 +1,13 @@
 importScripts('./range.js');
-const CACHE = 'yoru-bgm-v1';
-const SHELL = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest', './range.js', './fade-worker.js', './audio/water.wav', './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png', './icons/apple-touch-icon.png'];
+const CACHE = 'yoru-bgm-v2';
+const SHELL = ['./', './index.html', './styles.css', './app.js', './seamless-loop.js', './manifest.webmanifest', './range.js', './fade-worker.js', './audio/water.wav', './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png', './icons/apple-touch-icon.png'];
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)));
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE);
+    await cache.addAll(SHELL.map((url) => new Request(url, {cache: 'reload'})));
+    // Activate the refreshed cache, without reloading or interrupting a playing page.
+    await self.skipWaiting();
+  })());
 });
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {

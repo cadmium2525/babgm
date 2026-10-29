@@ -1,6 +1,11 @@
+import { SeamlessLoop } from './seamless-loop.js';
+
 const $ = (id) => document.getElementById(id);
 const audio = $('audio');
 const baseSource = new URL('./audio/water.wav', location.href).href;
+const loopPlayer = new SeamlessLoop({url: baseSource, onchange: () => update()});
+let loopBackend = 'web';
+let webAudioFailed = false;
 let mode = 'loop';
 let completed = false;
 let worker = null;
@@ -11,6 +16,14 @@ let fadeOffset = 0;
 let preparedFade = null;
 let deferredInstall = null;
 let returnFocus = null;
+
+function isPlaying() {
+  return mode === 'loop' && loopBackend === 'web'
+    ? !loopPlayer.paused : !audio.paused && !audio.ended;
+}
+function playbackPosition() {
+  return mode === 'loop' && loopBackend === 'web' ? loopPlayer.currentTime : audio.currentTime;
+}
 
 function readSetting(key, fallback) {
   try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
@@ -27,7 +40,7 @@ function formatTime(seconds) {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
 }
 function update() {
-  const playing = !audio.paused && !audio.ended;
+  const playing = isPlaying();
   $('play').setAttribute('aria-label', playing ? '一時停止' : '再生');
   $('play').setAttribute('aria-pressed', String(playing));
   $('play-icon').hidden = playing;
@@ -56,6 +69,7 @@ function cancelPreparation() {
   update();
 }
 function changeSource(source, loop, offset = 0) {
+  loopPlayer.pause();
   const oldBlob = blobUrl;
   audio.src = source;
   audio.loop = loop;
@@ -70,7 +84,10 @@ function restoreLoop(offset = 0) {
   completed = false;
   fadeDuration = 0;
   fadeOffset = 0;
-  changeSource(baseSource, true, offset % 60);
+  const position = offset % loopPlayer.duration;
+  changeSource(baseSource, true, position);
+  loopPlayer.currentTime = position;
+  loopBackend = webAudioFailed ? 'native' : 'web';
   update();
 }
 function commitFade(prepared) {
@@ -89,19 +106,44 @@ async function play() {
   try {
     if ('audioSession' in navigator) navigator.audioSession.type = 'playback';
   } catch { /* Optional on older Safari versions. */ }
-  try { await audio.play(); }
+  try {
+    if (mode === 'loop' && loopBackend === 'web') {
+      try { await loopPlayer.play(); }
+      catch (error) {
+        if (error.name === 'AbortError') return;
+        // Keep playback available where Web Audio cannot be created or decoded.
+        webAudioFailed = true;
+        loopBackend = 'native';
+        audio.currentTime = loopPlayer.currentTime;
+        await audio.play();
+      }
+    } else await audio.play();
+  }
   catch (error) {
     if (error.name !== 'AbortError') showError(error.name === 'NotAllowedError' ? '再生ボタンをタップしてください。' : '再生できません。もう一度お試しください。');
   }
   update();
 }
 function pause() {
+  const position = playbackPosition();
   cancelPreparation();
+  loopPlayer.pause();
   audio.pause();
+  if (mode === 'loop') {
+    loopPlayer.currentTime = position;
+    loopBackend = webAudioFailed ? 'native' : 'web';
+  }
   update();
 }
+function recoverLoop(message) {
+  const wasPlaying = isPlaying();
+  const position = playbackPosition();
+  restoreLoop(position);
+  if (wasPlaying) void play();
+  showError(message);
+}
 $('play').addEventListener('click', () => {
-  if (!audio.paused) pause();
+  if (isPlaying()) pause();
   else { cancelPreparation(); void play(); }
 });
 
@@ -115,11 +157,16 @@ $('fade-form').addEventListener('submit', (event) => {
   showError();
   // Start native audio while still in the user gesture. It continues during encoding.
   if (completed || audio.ended || mode === 'fade') restoreLoop();
-  const offsetSeconds = mode === 'loop' ? audio.currentTime : 0;
+  const offsetSeconds = playbackPosition();
+  // Authorize the native element in this gesture for the finite fade file.
+  // Its brief preparation uses native audio; regular playback uses the renderer.
+  loopPlayer.pause();
+  loopBackend = 'native';
+  audio.currentTime = offsetSeconds;
   void play();
   let currentWorker;
   try { currentWorker = new Worker(new URL('./fade-worker.js', import.meta.url)); }
-  catch { showError('このブラウザではフェードを準備できません。'); return; }
+  catch { recoverLoop('このブラウザではフェードを準備できません。'); return; }
   worker = currentWorker;
   const id = ++generation;
   $('progress').value = 0;
@@ -129,8 +176,7 @@ $('fade-form').addEventListener('submit', (event) => {
   update();
   const fail = () => {
     if (id !== generation) return;
-    cancelPreparation();
-    showError('準備できませんでした。短い時間でお試しください。');
+    recoverLoop('準備できませんでした。短い時間でお試しください。');
   };
   currentWorker.onerror = fail;
   currentWorker.onmessage = ({data}) => {
@@ -152,7 +198,13 @@ $('fade-form').addEventListener('submit', (event) => {
   currentWorker.postMessage({id, minutes, offsetSeconds, format: 'wav'});
 });
 $('cancel-fade').addEventListener('click', () => {
-  if (worker || preparedFade) { cancelPreparation(); return; }
+  if (worker || preparedFade) {
+    const wasPlaying = isPlaying();
+    const position = playbackPosition();
+    restoreLoop(position);
+    if (wasPlaying) void play();
+    return;
+  }
   const wasPlaying = !audio.paused && !audio.ended;
   const offset = fadeOffset + audio.currentTime;
   restoreLoop(offset);
@@ -161,9 +213,11 @@ $('cancel-fade').addEventListener('click', () => {
 
 const savedVolume = Number(readSetting('yoru-volume', '0.5'));
 audio.volume = Number.isFinite(savedVolume) ? Math.max(0, Math.min(1, savedVolume)) : 0.5;
+loopPlayer.volume = audio.volume;
 $('volume').value = String(audio.volume);
 $('volume').addEventListener('input', () => {
   audio.volume = Number($('volume').value);
+  loopPlayer.volume = audio.volume;
   saveSetting('yoru-volume', audio.volume);
 });
 const savedMinutes = Number(readSetting('yoru-minutes', '10'));
@@ -172,7 +226,7 @@ $('minutes').value = String(Number.isFinite(savedMinutes) && savedMinutes >= 0.1
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 if (isIOS) document.querySelector('.volume-row').hidden = true;
 
-audio.addEventListener('ended', () => { completed = true; update(); });
+audio.addEventListener('ended', () => { if (mode === 'fade') completed = true; update(); });
 for (const name of ['play', 'pause', 'loadedmetadata', 'durationchange', 'timeupdate']) audio.addEventListener(name, update);
 audio.addEventListener('error', () => showError('音声を読み込めません。ページを開き直してください。'));
 document.addEventListener('visibilitychange', () => {

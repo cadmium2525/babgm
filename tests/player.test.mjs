@@ -5,11 +5,12 @@ import vm from 'node:vm';
 
 const appUrl = 'https://example.test/player/app.js';
 const source = (await readFile(new URL('../dist/app.js', import.meta.url), 'utf8'))
+  .replace("import { SeamlessLoop } from './seamless-loop.js';", '')
   .replaceAll('import.meta.url', JSON.stringify(appUrl));
 
 // Exercise user-visible playback transitions without encoding audio or claiming
 // that a simulated browser can establish real phone lock-screen behavior.
-function createPlayer() {
+function createPlayer({failWebAudio = false, failWorkerCreation = false} = {}) {
   class Element {
     constructor() {
       this.listeners = new Map();
@@ -43,7 +44,7 @@ function createPlayer() {
       this.paused = true;
       this.ended = false;
       this.currentTime = 0;
-      this.duration = 60;
+      this.duration = 300;
       this.volume = 0.5;
       this.loads = 0;
     }
@@ -65,6 +66,23 @@ function createPlayer() {
     }
   }
   const audio = new Audio();
+  let loop;
+  class SeamlessLoop {
+    constructor({onchange}) {
+      loop = this;
+      this.onchange = onchange;
+      this.paused = true;
+      this.currentTime = 0;
+      this.duration = 300;
+      this.volume = 1;
+    }
+    async play() {
+      if (failWebAudio) throw new Error('Web Audio unavailable');
+      this.paused = false;
+      this.onchange();
+    }
+    pause() { this.paused = true; this.onchange(); }
+  }
   const elements = new Map([['audio', audio]]);
   const element = (id) => {
     if (!elements.has(id)) elements.set(id, new Element());
@@ -76,7 +94,10 @@ function createPlayer() {
   document.querySelector = element;
   const workers = [];
   class Worker {
-    constructor() { workers.push(this); }
+    constructor() {
+      if (failWorkerCreation) throw new Error('Worker unavailable');
+      workers.push(this);
+    }
     postMessage(message) { this.message = message; }
     terminate() { this.terminated = true; }
     complete(duration = Number(element('minutes').value) * 60) {
@@ -96,7 +117,7 @@ function createPlayer() {
   const settings = new Map();
   const mediaHandlers = new Map();
   const context = vm.createContext({
-    document, window: new Element(), location: { href: appUrl }, Worker,
+    document, window: new Element(), location: { href: appUrl }, Worker, SeamlessLoop,
     URL: BrowserURL, Blob,
     localStorage: { getItem: (key) => settings.get(key) ?? null, setItem: (key, value) => settings.set(key, value) },
     navigator: { userAgent: 'test', platform: 'test', maxTouchPoints: 0,
@@ -106,7 +127,7 @@ function createPlayer() {
   });
   new vm.Script(source, { filename: 'app.js' }).runInContext(context, { timeout: 1000 });
   return {
-    audio, element, workers, revoked, mediaHandlers,
+    audio, loop, element, workers, revoked, mediaHandlers,
     submit(minutes = 10) {
       element('minutes').value = String(minutes);
       element('fade-form').emit('submit');
@@ -120,12 +141,18 @@ function createPlayer() {
   };
 }
 
-test('normal audio loops; a prepared fade is a finite native audio source', () => {
+test('normal playback uses a renderer loop; a prepared fade is a finite native source', () => {
   const player = createPlayer();
   player.click('play');
   assert.equal(player.audio.loop, true);
-  assert.equal(player.audio.paused, false);
-  player.submit(10).complete(600);
+  assert.equal(player.loop.paused, false);
+  assert.equal(player.audio.paused, true, 'Normal playback never seeks the media element');
+  player.loop.currentTime = 123;
+  const worker = player.submit(10);
+  assert.equal(worker.message.offsetSeconds, 123);
+  assert.equal(player.loop.paused, true);
+  assert.equal(player.audio.currentTime, 123);
+  worker.complete(600);
   assert.equal(player.audio.loop, false);
   assert.equal(player.audio.paused, false);
   assert.match(player.audio.src, /^blob:/);
@@ -158,7 +185,8 @@ test('cancelling preparation ignores late worker results', () => {
   worker.complete();
   assert.equal(player.audio.src, originalSource);
   assert.equal(player.audio.loop, true);
-  assert.equal(player.audio.paused, false);
+  assert.equal(player.audio.paused, true);
+  assert.equal(player.loop.paused, false);
   assert.equal(player.element('progress').hidden, true);
   assert.equal(player.element('fade').disabled, false);
   assert.equal(player.element('cancel-fade').hidden, true);
@@ -215,6 +243,51 @@ test('replacing an almost finished fade loops during preparation; cancel restore
   player.click('cancel-fade');
   assert.equal(player.audio.loop, true);
   assert.equal(player.audio.currentTime, worker.message.offsetSeconds + 8);
-  assert.equal(player.audio.paused, false);
+  assert.equal(player.loop.currentTime, worker.message.offsetSeconds + 8);
+  assert.equal(player.loop.paused, false);
+  assert.equal(player.audio.paused, true);
   assert.equal(player.revoked.length, 2);
+});
+
+test('normal pause and resume retain the renderer position without loading native audio', () => {
+  const player = createPlayer();
+  player.click('play');
+  player.loop.currentTime = 299.9;
+  player.click('play');
+  assert.equal(player.loop.paused, true);
+  assert.equal(player.loop.currentTime, 299.9);
+  player.click('play');
+  assert.equal(player.loop.paused, false);
+  assert.equal(player.loop.currentTime, 299.9);
+  assert.equal(player.audio.loads, 0);
+});
+
+test('unsupported Web Audio retains native playback as a compatibility fallback', async () => {
+  const player = createPlayer({failWebAudio: true});
+  player.click('play');
+  await new Promise(setImmediate);
+  assert.equal(player.audio.paused, false);
+  assert.equal(player.audio.loop, true);
+  player.audio.currentTime = 210;
+  player.click('play');
+  assert.equal(player.audio.paused, true);
+  player.click('play');
+  assert.equal(player.audio.currentTime, 210);
+  assert.equal(player.audio.paused, false);
+});
+
+test('failure to create or render a fade returns normal playback to the seamless engine', () => {
+  for (const failWorkerCreation of [true, false]) {
+    const player = createPlayer({failWorkerCreation});
+    player.click('play');
+    player.loop.currentTime = 217;
+    const worker = player.submit(5);
+    if (worker) worker.onerror();
+    assert.equal(player.loop.paused, false);
+    assert.equal(player.loop.currentTime, 217);
+    assert.equal(player.audio.paused, true);
+    assert.equal(player.element('progress').hidden, true);
+    assert.equal(player.element('cancel-fade').hidden, true);
+    assert.equal(player.element('error').hidden, false);
+  }
 });
